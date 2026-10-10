@@ -1,0 +1,13 @@
+# 依赖与安装产物
+node_modules/
+pnpm-lock.yaml
+
+# 本地覆盖与临时文件
+*.local.yml
+*.log
+.DS_Store
+Thumbs.db
+
+# 侦察/抓取产物（可能含账户信息），永远不要入库
+.recon/
+quote*.json

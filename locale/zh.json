@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "提供商询价",
+    "description": "查询正在使用的模型提供商的账户余额与模型单价（USD / 1M tokens）：余额按 baseURL 自动匹配厂商适配器，单价来自 OpenRouter 价格目录。"
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Provider quote",
+    "description": "Quote the provider you are using: account balance plus model prices (USD / 1M tokens). Balance adapters are dispatched by baseURL; prices come from the OpenRouter catalog."
+  }
+}

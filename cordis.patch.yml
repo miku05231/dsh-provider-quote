@@ -1,0 +1,35 @@
+- insert:
+    - id: provider-quote
+      # 包内入口（相对说明符按包目录解析）。运行中的 DSH 按「解析后的模块 URL」
+      # 缓存模块：改完宿主代码必须重启 DSH 才会加载新代码（set_bundle 关/开也换不掉
+      # 同一 URL 的旧模块实例）。装到新 profile 时是全新进程，直接用这个相对路径。
+      name: './lib/host.js'
+      config:
+        # 余额适配器：'auto' = 按 baseURL 自动分派（OpenRouter / DeepSeek 官方 /
+        # 中转站 /user/balance / one-api / OpenAI billing），也可写死成数组如
+        # ['relay-user-balance'] 只跑指定适配器。
+        adapters: auto
+        timeoutMs: 12000
+        # OpenRouter 价格目录缓存时长（毫秒），默认 6 小时。
+        catalogTtlMs: 21600000
+        # 后台预热询价的间隔（分钟），0 = 关闭（只在调用/打开面板时查询）。
+        autoRefreshMinutes: 0
+        # 直接粘贴 cc-switch「使用脚本」里的 code：键是 host 或 glob，值是 JS 表达式。
+        # 例：
+        #   scripts:
+        #     relay.example.com: >-
+        #       ({ request: { url: "{{baseUrl}}/user/balance", method: "GET",
+        #                     headers: { "Authorization": "Bearer {{apiKey}}" } },
+        #          extractor: function (response) { return { isValid: true, remaining: response.balance, unit: "USD" }; } })
+        scripts: {}
+        # 模型 ↔ 价格目录的映射与覆盖（USD / 1M tokens）。
+        # 例：
+        #   priceOverrides:
+        #     deepseek-flash: { openrouterId: deepseek/deepseek-chat }
+        #     my-local-model: { input: 0.3, output: 0.9, cacheRead: 0.03, cacheWrite: 0.4 }
+        priceOverrides: {}
+        # 手动补全/覆盖提供商（自动发现失败时用；键是 provider id）。
+        # 例：
+        #   providers:
+        #     my-relay: { baseURL: https://relay.example.com/v1, apiKeyEnv: MY_RELAY_API_KEY }
+        providers: {}

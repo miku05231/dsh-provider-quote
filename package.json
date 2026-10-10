@@ -1,0 +1,60 @@
+{
+  "name": "@local/dsh-provider-quote",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "对正在使用的模型提供商询价：账户余额 + 模型单价（USD / 1M tokens）",
+  "license": "MIT",
+  "author": "miku05231",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/miku05231/dsh-provider-quote.git"
+  },
+  "homepage": "https://github.com/miku05231/dsh-provider-quote#readme",
+  "keywords": [
+    "dsh",
+    "cordis",
+    "plugin",
+    "llm",
+    "balance",
+    "pricing"
+  ],
+  "icon": "./icon.svg",
+  "exports": {
+    ".": "./lib/host.js",
+    "./host": "./lib/host.js",
+    "./index": "./index.js",
+    "./client": "./client.js",
+    "./pricing": "./lib/pricing.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "lib/host.js",
+    "client.js",
+    "lib/pricing.js",
+    "cordis.patch.yml",
+    "icon.svg",
+    "locale/*.json",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.2.0-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ],
+      "platform": "web",
+      "immediately": true
+    }
+  }
+}
