@@ -20,11 +20,23 @@
     * `GET /api/provider-quote/summary`（`?refresh=1` 跳过 30s 报价缓存）
     * `GET /api/provider-quote/refresh`（同上，路径别名）
     * `GET /api/provider-quote/ping` —— 自检：版本、当前加载的模块 URL、目录缓存里的模型数
+    * 可选查询参数（浏览器端就是这么问的）：`scope=session|default`、`sessionId=<会话 id>`、`provider=<提供商 id>`、`model=<模型 id>`。带着 `scope=session&provider=…` 时，报价里的「使用中」就是**那个会话自己的模型选择**；只带 `sessionId`（会话还没选过模型）或什么都不带时，按**新会话的默认模型**（全局默认）处理 —— 见下面「本会话 vs 全局默认」。
   * 可选的定时预热（`autoRefreshMinutes`）
 * **客户端（`client.js`）** —— 两个挂载点：
-  * 对话输入框下方的常驻胶囊（slot `conversation.composer.dock`，与自带的 `stats` 同一行）：`● 余额 12.4 USD` —— **只显示当前会话选中的提供商的余额**；在输入框的模型选择器里换提供商，胶囊立刻跟着换（报价本身含所有提供商的余额，不需要重新询价）；点一下立即重新询价（走 `?refresh=1`，跳过宿主的 30s 缓存），查询中是「余额查询中…」，失败是「余额没查到」，选中的提供商没被收录时是「余额未知」并自动重查一次；悬停可见提供商、余额来源与失败原因；每 5 分钟静默刷新一次。要看各提供商余额、模型单价与目录候选，用下面的设置页面板。
-  * 「设置 → 模型」页底部的询价面板（slot `settings.models.footer`）：当前提供商的余额、当前模型的单价、其余提供商的概览，带「刷新询价」按钮。
+  * 对话输入框下方的常驻胶囊（slot `conversation.composer.dock`，与自带的 `stats` 同一行）：`● 余额 12.4 USD` —— **只显示本会话选中的提供商的余额**；在输入框的模型选择器里换提供商，胶囊立刻跟着换（报价本身含所有提供商的余额，不需要重新询价）；点一下立即重新询价（走 `?refresh=1`，跳过宿主的 30s 缓存，并带上本会话的选择），查询中是「余额查询中…」，失败是「余额没查到」，选中的提供商没被收录时是「余额未知」并自动重查一次；悬停可见提供商、来源（本会话选择 / 全局默认）与失败原因；每 5 分钟静默刷新一次。要看各提供商余额、模型单价与目录候选，用下面的设置页面板。
+  * 「设置 → 模型」页底部的询价面板（slot `settings.models.footer`）：当前提供商的余额、当前模型的单价、其余提供商的概览，带「刷新询价」按钮（设置页没有会话上下文，固定按全局默认问）。
   * 两个组件共用同一份取数（模块内 store），不会重复请求宿主。
+
+## 本会话 vs 全局默认
+
+DSH 里有**两套**「当前用哪个提供商」，插件必须分清楚，否则会出现「胶囊显示 A、点刷新却查了 B」：
+
+| | 是什么 | 谁在用 | 插件怎么读 |
+| --- | --- | --- | --- |
+| **本会话选择** | 每个会话自己的模型选择（`modelSelection` 投影，`next ?? lastUsed`） | 输入框下方的模型选择器 | 胶囊所在 slot 的标准属性 `useProjection('modelSelection')`；读不到时退回官方 `modelDirectories` 里该会话的目录快照 |
+| **全局默认** | `agentDefaultModel.currentSelection()`，**只决定新会话**用什么 | 设置页面板、`provider_quote` 工具、没选过模型的会话 | 宿主侧读 `agentDefaultModel` 服务 |
+
+于是：**显示**永远按本会话的选择（同一个窗口里切换会话，胶囊立刻跟着新会话走）；**点刷新**会把 `scope=session&sessionId=…&provider=…&model=…` 一起带给宿主，宿主按这个会话解析「使用中」，不会因为别的会话刚改过选择而查错对象。会话还没选过模型时就按全局默认走，并如实标注来源；读不到会话信息时也不会静默顶替成别的会话的选择。
 
 ## 安装
 
@@ -141,8 +153,10 @@ curl -s "http://127.0.0.1:<DSH 端口>/api/provider-quote/ping"       # 自检�
 
 ```
 $ curl -s "http://127.0.0.1:<DSH 端口>/api/provider-quote/ping"
-{"ok":true,"version":"0.3.0","entry":"lib/host.js","catalogModels":458,
- "adapters":"auto","providers":["openrouter","deepseek-official"]}
+{
+  "ok":true,"version":"0.3.1","entry":"lib/host.js","catalogModels":458,
+  "adapters":"auto","providers":["openrouter","deepseek-official"]
+}
 ```
 
 agent 侧则直接用工具：`provider_quote()` / `provider_quote({ models: true })` / `provider_quote({ provider: 'openrouter' })`。
@@ -151,8 +165,8 @@ agent 侧则直接用工具：`provider_quote()` / `provider_quote({ models: tru
 
 ```bash
 node tests/demo-openrouter.mjs  # 演示：fetch 桩喂 OpenRouter 数据跑真实报价管线（不联网、不需要 key）
-node tests/smoke.mjs --offline  # 16 项：只跑纯函数与缓存逻辑（含 fetch 桩，不联网）—— 任何机器都能直接跑
-node tests/client-smoke.mjs     # 11 项：客户端 bundle 的模块工厂 + 两个 slot 注册 + 面板渲染 + 余额胶囊（显示/点击刷新/失败态/跟随提供商选择）
+node tests/smoke.mjs --offline  # 21 项：纯函数、询价目标解析与缓存逻辑（含 fetch 桩，不联网）—— 任何机器都能直接跑
+node tests/client-smoke.mjs     # 15 项：客户端 bundle 的模块工厂 + 两个 slot 注册 + 面板渲染 + 余额胶囊（显示/点击刷新/失败态/跟随本会话选择/切换会话/刷新带会话）
 ```
 
 联网的那一段（真实余额 / 模型列表 / 价格目录）**仓库里不含任何真实端点**，要自己用环境变量把目标传进去 —— 目标清单是你自己的，不会进版本库：

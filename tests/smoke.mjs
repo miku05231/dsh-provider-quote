@@ -33,6 +33,8 @@ import {
   suggestCatalogModels,
   runUsageScript,
 } from '../lib/pricing.js';
+// 宿主半的纯函数（目标解析）也在这里离线验证；import 不会注册任何路由或工具。
+import { readQuoteTarget } from '../lib/host.js';
 
 const CREDENTIALS = process.env.DSH_CREDENTIALS
   ?? `${homedir().replace(/\\/g, '/')}/.dsh/.credentials.yaml`;
@@ -145,6 +147,38 @@ check(
   cachedQuote.catalog.modelCount === 1 && cachedModel.price !== null && cachedModel.price.input === 0.6,
   JSON.stringify(cachedModel.price),
 );
+
+/* ---- 宿主：询价目标解析（readQuoteTarget）与「当前使用」的来源标注 ---- */
+const fallback = { provider: 'global-pick', model: 'global-model', source: 'global-default' };
+const targetOf = (query) => readQuoteTarget(new URLSearchParams(query), fallback);
+
+const untouched = targetOf('');
+check('询价目标：没带参数时沿用全局默认', untouched.provider === 'global-pick' && untouched.source === 'global-default', JSON.stringify(untouched));
+
+const bySession = targetOf('scope=session&sessionId=s-1&provider=relay-b&model=m-1');
+check(
+  '询价目标：scope=session → 按本会话的选择',
+  bySession.provider === 'relay-b' && bySession.model === 'm-1' && bySession.source === 'session' && bySession.sessionId === 's-1',
+  JSON.stringify(bySession),
+);
+
+const freshSession = targetOf('scope=default&sessionId=s-2');
+check(
+  '询价目标：会话没选过模型 → 全局默认 + 会话 id',
+  freshSession.provider === 'global-pick' && freshSession.source === 'global-default' && freshSession.sessionId === 's-2',
+  JSON.stringify(freshSession),
+);
+
+const named = targetOf('provider=relay-c');
+check('询价目标：只点名 provider → 记为指定', named.provider === 'relay-c' && named.source === 'explicit', JSON.stringify(named));
+
+const quoteText = renderQuoteText({
+  generatedAt: 'T',
+  catalog: null,
+  providers: [],
+  active: { provider: 'relay-b', model: 'm-1', source: 'session' },
+});
+check('报价文案：标出「使用中」是本会话选择', quoteText.includes('当前使用：relay-b · m-1（本会话选择）'), quoteText.split('\n')[1]);
 
 if (offline) finish('offline');
 

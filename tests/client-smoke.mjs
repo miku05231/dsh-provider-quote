@@ -409,7 +409,7 @@ async function main() {
     const pill = findByProps(tree, 'data-provider-quote-pill')[0];
     assert.match(
       String(pill.props.title),
-      /relay-a 余额 53\.21 USD · 来源 script https:\/\/relay-a\.example\.com\/user\/balance · 点击刷新/,
+      /relay-a 余额 53\.21 USD · 全局默认（本会话未选过模型） · 来源 script https:\/\/relay-a\.example\.com\/user\/balance · 点击刷新/,
       '悬停详情应带上提供商、来源与「点击刷新」',
     );
   });
@@ -501,7 +501,11 @@ async function main() {
     Dock({ sessionId: 'session-unknown' });
     await tick();
     assert.equal(calls.length, 2, '未收录的提供商应触发一次重查');
-    assert.equal(calls[1], '/api/provider-quote/summary?refresh=1', '重查应跳过宿主缓存');
+    assert.equal(
+      calls[1],
+      '/api/provider-quote/summary?refresh=1&scope=session&sessionId=session-unknown&provider=brand-new&model=deepseek-flash',
+      '重查应跳过宿主缓存，并带上本会话的选择',
+    );
 
     runtime.beginRender();
     const tree = Dock({ sessionId: 'session-unknown' });
@@ -516,6 +520,119 @@ async function main() {
     runtime.beginRender();
     Dock({ sessionId: 'session-unknown' });
     assert.equal(calls.length, 2, '重查仍无结果时不该反复请求');
+  });
+
+  await test('底部胶囊：本会话投影优先于全局默认（别的会话改选择也不受影响）', async () => {
+    const { Dock, runtime } = mount();
+    // 官方投影 modelSelection：取值口径 next ?? lastUsed，另一会话选了 next=relay-a 也白搭
+    const picked = {
+      next: { provider: 'relay-c', model: 'deepseek-flash' },
+      lastUsed: { provider: 'relay-a', model: 'deepseek-chat' },
+    };
+    const useProjection = (key) => (key === 'modelSelection' ? picked : undefined);
+    globalThis.fetch = async () => ({ ok: true, status: 200, json: async () => SUMMARY });
+
+    runtime.beginRender();
+    Dock({ sessionId: 'session-proj', useProjection });
+    await tick();
+    runtime.beginRender();
+    const tree = Dock({ sessionId: 'session-proj', useProjection });
+    assert.match(textsOf(tree).join(' | '), /余额 12\.5 CNY/, '应按本会话的选择（next）显示余额');
+    assert.match(
+      String(findByProps(tree, 'data-provider-quote-pill')[0].props.title),
+      /^relay-c 余额 12\.5 CNY · 本会话选择/,
+      'title 应点明来源是本会话选择',
+    );
+  });
+
+  await test('底部胶囊：点击刷新带上本会话（scope=session + sessionId + provider）', async () => {
+    const { Dock, runtime } = mount();
+    const picked = { next: { provider: 'relay-c', model: 'deepseek-flash' }, lastUsed: null };
+    const useProjection = (key) => (key === 'modelSelection' ? picked : undefined);
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => SUMMARY };
+    };
+
+    runtime.beginRender();
+    Dock({ sessionId: 'session-refresh', useProjection });
+    await tick();
+    runtime.beginRender();
+    findByProps(Dock({ sessionId: 'session-refresh', useProjection }), 'data-provider-quote-pill')[0].props.onClick({});
+    await tick();
+
+    assert.equal(calls.length, 2, '点击应再请求一次');
+    assert.equal(
+      calls[1],
+      '/api/provider-quote/summary?refresh=1&scope=session&sessionId=session-refresh&provider=relay-c&model=deepseek-flash',
+      '刷新必须把本会话的选择带给宿主',
+    );
+  });
+
+  await test('底部胶囊：会话没选过模型 → 按全局默认询价并如实标注', async () => {
+    const { Dock, runtime } = mount();
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => SUMMARY };
+    };
+
+    runtime.beginRender();
+    Dock({ sessionId: 'session-fresh' });
+    await tick();
+    runtime.beginRender();
+    const tree = Dock({ sessionId: 'session-fresh' });
+    assert.match(textsOf(tree).join(' | '), /余额 53\.21 USD/, '应按宿主报价的全局默认提供商显示');
+    assert.match(
+      String(findByProps(tree, 'data-provider-quote-pill')[0].props.title),
+      /全局默认（本会话未选过模型）/,
+      'title 应说明来源是全局默认',
+    );
+
+    findByProps(tree, 'data-provider-quote-pill')[0].props.onClick({});
+    await tick();
+    assert.equal(
+      calls[1],
+      '/api/provider-quote/summary?refresh=1&scope=default&sessionId=session-fresh',
+      '没选过模型时也要告诉宿主是哪个会话在问',
+    );
+  });
+
+  await test('底部胶囊：同一窗口切换会话 → 显示跟随新会话，刷新也按新会话', async () => {
+    const { Dock, runtime } = mount();
+    let picked = { next: { provider: 'relay-c', model: 'deepseek-flash' }, lastUsed: null };
+    const useProjection = (key) => (key === 'modelSelection' ? picked : undefined);
+    const calls = [];
+    globalThis.fetch = async (url) => {
+      calls.push(url);
+      return { ok: true, status: 200, json: async () => SUMMARY };
+    };
+
+    runtime.beginRender();
+    Dock({ sessionId: 'session-a', useProjection });
+    await tick();
+    runtime.beginRender();
+    assert.match(textsOf(Dock({ sessionId: 'session-a', useProjection })).join(' | '), /余额 12\.5 CNY/);
+
+    picked = { next: { provider: 'relay-a', model: 'deepseek-chat' }, lastUsed: null };
+    runtime.beginRender();
+    const tree = Dock({ sessionId: 'session-b', useProjection });
+    assert.match(textsOf(tree).join(' | '), /余额 53\.21 USD/, '切换会话后应显示新会话选中的提供商');
+    assert.match(
+      String(findByProps(tree, 'data-provider-quote-pill')[0].props.title),
+      /^relay-a 余额 53\.21 USD · 本会话选择/,
+      'title 应跟着新会话走',
+    );
+    assert.equal(calls.length, 1, '报价里已含所有提供商，切换会话不该再请求');
+
+    findByProps(tree, 'data-provider-quote-pill')[0].props.onClick({});
+    await tick();
+    assert.equal(
+      calls[1],
+      '/api/provider-quote/summary?refresh=1&scope=session&sessionId=session-b&provider=relay-a&model=deepseek-chat',
+      '切换会话后的刷新应按新会话的选择询价',
+    );
   });
 
   console.log(`\n${passed} passed, ${failed} failed`);

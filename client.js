@@ -115,6 +115,9 @@ window.__ModuleLoader__.load({
       busy: false,
       fetchedAt: 0,
       inflight: null,
+      // 最近一次询价的目标（本会话的模型选择）。不传目标的刷新沿用它，
+      // 免得自动刷新把「本会话」悄悄换成「全局默认」。
+      target: null,
       listeners: new Set(),
     };
 
@@ -122,11 +125,34 @@ window.__ModuleLoader__.load({
       for (const listener of [...store.listeners]) listener();
     }
 
-    function loadQuote(refresh) {
+    /**
+     * 询价 URL：把「本会话的模型选择」带给宿主，宿主据此判定「使用中」的提供商。
+     *   - `scope=session` + `provider` / `model`：这个会话自己选过的模型；
+     *   - `scope=default` + `sessionId`：这个会话还没选过，按新会话默认模型（全局默认）；
+     *   - 两者都没有：宿主按全局默认处理。
+     */
+    function quoteUrl(target, refresh) {
+      const params = new URLSearchParams();
+      if (refresh === true) params.set('refresh', '1');
+      if (typeof target?.scope === 'string' && target.scope !== '') params.set('scope', target.scope);
+      if (typeof target?.sessionId === 'string' && target.sessionId !== '') params.set('sessionId', target.sessionId);
+      if (typeof target?.provider === 'string' && target.provider !== '') params.set('provider', target.provider);
+      if (typeof target?.model === 'string' && target.model !== '') params.set('model', target.model);
+      const query = params.toString();
+      return query === '' ? SUMMARY_URL : `${SUMMARY_URL}?${query}`;
+    }
+
+    /**
+     * @param refresh 是否跳过宿主缓存。
+     * @param target  本次询价的目标：对象 = 用它；`null` = 明确按全局默认（设置页面板用）；
+     *                省略 = 沿用上次的目标（自动刷新用）。
+     */
+    function loadQuote(refresh, target) {
+      if (target !== undefined) store.target = target ?? null;
       if (refresh !== true && store.inflight !== null) return store.inflight;
       store.busy = true;
       notify();
-      const url = refresh === true ? `${SUMMARY_URL}?refresh=1` : SUMMARY_URL;
+      const url = quoteUrl(store.target, refresh);
       const task = fetch(url, { headers: { accept: 'application/json' } })
         .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
         .then((data) => {
@@ -244,7 +270,8 @@ window.__ModuleLoader__.load({
         h('span', { key: 'title', style: { color: color.primary, fontSize: 14, fontWeight: 600 } }, '提供商询价'),
         h('span', { key: 'sub', style: { color: color.dimmed, fontSize: 11 } }, catalogNote(catalog)),
         h('span', { key: 'spacer', style: { flex: 1 } }),
-        h(RefreshButton, { key: 'refresh', busy: state.busy, onClick: () => loadQuote(true) }),
+        // 设置页没有会话上下文 → 明确按全局默认询价（不受某个会话的选择影响）
+        h(RefreshButton, { key: 'refresh', busy: state.busy, onClick: () => loadQuote(true, null) }),
       ]));
 
       if (loading) {
@@ -311,24 +338,52 @@ window.__ModuleLoader__.load({
       return store;
     }
 
-    function readSelectedProvider(store) {
-      if (store === undefined) return null;
+    /** 会话模型选择 → `{ provider, model }`；缺 provider 就不算选中。 */
+    function choiceOf(row) {
+      const provider = row?.provider;
+      if (typeof provider !== 'string' || provider === '') return null;
+      return {
+        provider,
+        model: typeof row.model === 'string' && row.model !== '' ? row.model : undefined,
+      };
+    }
+
+    /**
+     * 官方投影 modelSelection（slot 标准属性 `useProjection` 注入）：
+     * 取值口径与客户端输入栏一致 —— `next ?? lastUsed`（见 ui-chat 的 SessionInputShell）。
+     */
+    function readProjectedChoice(value) {
       try {
-        const snapshot = typeof store.getSnapshot === 'function' ? store.getSnapshot() : undefined;
-        const provider = snapshot?.pending?.provider ?? snapshot?.current?.provider;
-        return typeof provider === 'string' && provider !== '' ? provider : null;
+        return choiceOf(value?.next ?? value?.lastUsed);
       } catch {
         return null;
       }
     }
 
+    /** 退路一：官方 modelDirectories 里本会话的目录快照（`pending ?? current`，与官方选择器一致）。 */
+    function readDirectoryChoice(store) {
+      if (store === undefined) return null;
+      try {
+        const snapshot = typeof store.getSnapshot === 'function' ? store.getSnapshot() : undefined;
+        return choiceOf(snapshot?.pending ?? snapshot?.current);
+      } catch {
+        return null;
+      }
+    }
+
+    function sameChoice(a, b) {
+      if (a === null || b === null) return a === b;
+      return a.provider === b.provider && a.model === b.model;
+    }
+
     /** 跟随本会话的模型选择：目录一变就重渲染；报价本身含所有提供商的余额，故无需重新询价。 */
-    function useSelectedProvider(store) {
-      const [selected, setSelected] = useState(() => readSelectedProvider(store));
+    function useDirectoryChoice(store) {
+      const [choice, setChoice] = useState(() => readDirectoryChoice(store));
       useEffect(() => {
         if (store === undefined || typeof store.subscribe !== 'function') return undefined;
         const sync = () => {
-          setSelected(readSelectedProvider(store));
+          const next = readDirectoryChoice(store);
+          setChoice((current) => (sameChoice(current, next) ? current : next));
         };
         sync();
         try {
@@ -338,14 +393,30 @@ window.__ModuleLoader__.load({
           return undefined;
         }
       }, [store]);
-      return selected;
+      return choice;
     }
 
     function ProviderQuoteDock(props) {
       const state = useQuote();
       useAutoRefresh();
 
-      const selectedId = useSelectedProvider(directoryStore(props?.sessionId));
+      // 本会话的模型选择：优先官方投影（slot 标准属性 useProjection 注入的 modelSelection），
+      // 读不到再退回官方 modelDirectories。两者都拿不到（会话还没选过模型）时，显示与刷新
+      // 都按宿主的新会话默认模型（全局默认）走，并在 title 里如实标注来源 ——
+      // 绝不会因为"另一个会话"改了选择就把本会话的刷新指向别的提供商。
+      const projected = typeof props?.useProjection === 'function' ? props.useProjection('modelSelection') : undefined;
+      const projectedChoice = readProjectedChoice(projected);
+      const sessionId = typeof props?.sessionId === 'string' && props.sessionId !== '' ? props.sessionId : undefined;
+      const directoryChoice = useDirectoryChoice(directoryStore(sessionId));
+      const choice = projectedChoice ?? directoryChoice;
+      const target = choice !== null
+        ? { scope: 'session', sessionId, provider: choice.provider, model: choice.model }
+        : sessionId === undefined ? null : { scope: 'default', sessionId };
+      const targetKey = target === null
+        ? ''
+        : [target.scope, target.sessionId ?? '', target.provider ?? '', target.model ?? ''].join('|');
+      const selectedId = choice?.provider ?? null;
+
       const providers = Array.isArray(state.data?.providers) ? state.data.providers : [];
       const active = selectedId === null
         ? providers.find((provider) => provider.active === true) ?? providers[0]
@@ -353,9 +424,14 @@ window.__ModuleLoader__.load({
       const missing = selectedId !== null && state.data !== null && active === undefined;
 
       useEffect(() => {
-        // 更换到的提供商还没进报价（例如刚写进配置）→ 立刻重查一次
-        if (missing) void loadQuote(true);
-      }, [missing, selectedId]);
+        // 更换到的提供商还没进报价（例如刚写进配置）→ 立刻带着本会话的选择重查一次
+        if (missing) void loadQuote(true, target);
+      }, [missing, selectedId, targetKey]);
+
+      useEffect(() => {
+        // 记住本会话的选择：不显式带目标的刷新（自动刷新）沿用它，不会被别的会话带偏
+        store.target = target ?? null;
+      }, [targetKey]);
 
       const view = balanceView(active?.balance);
       const loading = state.data === null && state.error === null;
@@ -375,6 +451,7 @@ window.__ModuleLoader__.load({
             ? '余额未知'
             : `余额 ${view.text}`;
 
+      const sourceNote = choice === null ? '全局默认（本会话未选过模型）' : '本会话选择';
       const title = failed
         ? `询价失败：${state.error ?? ''}（点击重试）`
         : loading
@@ -385,6 +462,7 @@ window.__ModuleLoader__.load({
               : `${selectedId ?? '当前提供商'} 不在询价列表（未配置 baseURL 或未纳入报价）· 点击刷新`
             : [
               `${active.id} 余额 ${view.text}`,
+              sourceNote,
               view.detail === '' ? null : view.detail,
               '点击刷新',
             ].filter(Boolean).join(' · ');
@@ -392,7 +470,7 @@ window.__ModuleLoader__.load({
       return h('button', {
         type: 'button',
         onClick: () => {
-          void loadQuote(true);
+          void loadQuote(true, target);
         },
         title,
         'data-provider-quote-pill': '1',
