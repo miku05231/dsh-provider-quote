@@ -6,8 +6,8 @@
       name: './lib/host.js'
       config:
         # 余额适配器：'auto' = 按 baseURL 自动分派（OpenRouter / DeepSeek 官方 /
-        # 中转站 /user/balance / one-api / OpenAI billing），也可写死成数组如
-        # ['relay-user-balance'] 只跑指定适配器。
+        # 中转站 /user/balance / one-api / New API 访问令牌 / OpenAI billing），也可写死成
+        # 数组如 ['new-api'] 只跑指定适配器。
         adapters: auto
         timeoutMs: 12000
         # OpenRouter 价格目录缓存时长（毫秒），默认 6 小时。
@@ -32,4 +32,14 @@
         # 例：
         #   providers:
         #     my-relay: { baseURL: https://relay.example.com/v1, apiKeyEnv: MY_RELAY_API_KEY }
+        # New API 面板（quota_per_unit / display_in_currency）：API key 读不到账户余额
+        # （GET /api/user/self 只认 dashboard 会话或访问令牌），要准确余额就再给个 PAT
+        # （面板 → 个人设置 → 安全 → 访问令牌，scope 需含 profile:read）：
+        #   providers:
+        #     my-new-api-relay:
+        #       baseURL: https://relay.example.com/v1
+        #       apiKeyEnv: MY_RELAY_API_KEY
+        #       accessTokenEnv: MY_RELAY_ACCESS_TOKEN   # 或直接 accessToken: pat-xxxx
+        #       userId: 2        # 可选：令牌绑在非默认用户时带上 New-Api-User 头
+        #       quotaPerUnit: 500000   # 可选：覆盖从 /api/status 读到的换算比例
         providers: {}

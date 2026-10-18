@@ -56,8 +56,9 @@ plugin_manager action=install_bundle target=<本插件的绝对路径，如 ~/de
 | `openrouter` | `GET {origin}/api/v1/credits`（+ `/api/v1/key`） | OpenRouter 官方：余额 = total_credits − total_usage |
 | `deepseek-official` | `GET {origin}/user/balance` | DeepSeek 官方：`balance_infos[]`（CNY/USD），`is_available` |
 | `relay-user-balance` | `GET {base}/user/balance`、`{origin}/user/balance` | 多数中转站的通用布局：`balance` / `remaining` / `is_active` / `unit` |
-| `one-api` | `GET {base}/api/user/self` | one-api / New API 布局：`quota`（÷500000 估算 USD，仅参考） |
-| `openai-billing` | `GET {base}/dashboard/billing/subscription` + `/usage` | 旧版 OpenAI 计费接口 |
+| `one-api` | `GET {base}/api/user/self`（API key） | one-api / New API 布局：`quota`（÷`quota_per_unit` 估算 USD，仅参考）；New API 会对 API key 回 401，需改用下面的 `new-api` |
+| `new-api` | `GET {base}/api/status` + `GET {base}/api/user/self`（访问令牌） | New API 面板的**准确**余额：`quota` / `used_quota` ÷ 面板自己的 `quota_per_unit`；需在配置里给访问令牌 |
+| `openai-billing` | `GET {base}/dashboard/billing/subscription` + `/usage` | 旧版 OpenAI 计费接口；返回 `100000000` 视为 New API 的「无限额度」占位值，不当作余额，只报已用 |
 | `script:<host>` | 你配置的 `scripts` | 任意厂商：直接粘贴 cc-switch 的 usage_script |
 
 自定义脚本与 cc-switch 完全兼容，模板变量 `{{baseUrl}}` / `{{apiKey}}` 会被替换：
@@ -81,6 +82,29 @@ scripts:
 * **模型会重名**：同一个 id（例如 `deepseek-flash`）在不同站可能是不同后端，所以插件**不猜价** —— 匹配不到就写「未匹配到价格」并给出目录候选，由你确认后再 `priceOverrides` 锚定。
 * **key 走凭据名**：配置里写 `apiKeyEnv: MY_RELAY_API_KEY` 这类名字，插件用 `ctx.credentials` 按需解析（改 key 立即生效），从不落盘、不打印明文。
 * **同一站可以配多个条目**：比如同一个中转站分成「按月套餐」和「按量付费」两个 key，写两个 provider id 即可分别看余额与单价。
+
+### New API 面板：为什么余额会显示「99999998 USD」
+
+如果你用的中转站是 [New API](https://github.com/Calcium-Ion/new-api) 搭的（`GET /api/status` 能返回 `quota_per_unit` / `display_in_currency`），用**只有 API key** 的配置去查余额，过去会看到九位数的假余额，或者干脆查不到：
+
+* 新版 OpenAI 计费接口 `GET /dashboard/billing/subscription` 在「无限额度」账户上返回 `hard_limit_usd: 100000000` —— 这是 New API 源码里的**占位哨兵值**（`controller/billing.go`：`if token.UnlimitedQuota { amount = 100000000 }`），不是钱。旧版插件拿它减 `total_usage` 得到 9.9999 亿。
+* `GET /api/user/self`（真正能读到 `quota` / `used_quota` 的接口）只认 **dashboard 会话或访问令牌（PAT）**，用 `sk-` 开头的 API key 打过去恒为 `401 {"code":"AUTH_UNAUTHORIZED"}`。New API 没有「仅用 API key 取账户余额」的端点，所以这一步绕不过去。
+
+插件的处理（v0.4.0 起）：
+
+1. 识别到 `100000000` 就**不当余额**，只报真实「已用」并说明原因，不再显示九位数；
+2. 想要**准确余额**，在面板「个人设置 → 安全 → 访问令牌」新建一个令牌（新版按路由 scope 校验，读账户信息需要 `profile:read`），把令牌写进配置即可 —— 插件会先读 `/api/status` 拿到站点自己的 `quota_per_unit`，再用令牌读 `/api/user/self`，换算成 USD：
+
+```yaml
+providers:
+  xianapi-ds:
+    baseURL: https://www.xianapi.cloud/v1
+    accessTokenEnv: XIANAPI_DS_ACCESS_TOKEN   # 凭据名，和 apiKeyEnv 一样走 ctx.credentials
+    # 或者直接写 accessToken: pat-xxxx（不推荐：会进配置文件）
+    # 令牌绑在非默认用户上时再加 userId: 2   → 会带 New-Api-User 头
+```
+
+没给访问令牌也能用：胶囊会显示「已用 $X.XX」而不是假余额。配置里 `quotaPerUnit` 可覆盖自动读取的 `quota_per_unit`（面板改过换算比例时才需要）。
 
 ## 单价匹配
 
@@ -124,7 +148,7 @@ priceOverrides:
 | `autoRefreshMinutes` | `0` | 后台预热间隔，0 = 关闭 |
 | `scripts` | `{}` | host/glob → cc-switch usage_script |
 | `priceOverrides` | `{}` | 模型 → 目录 id 或直给单价 |
-| `providers` | `{}` | provider id → `{ baseURL, apiKeyEnv, adapters, skipModels }` |
+| `providers` | `{}` | provider id → `{ baseURL, apiKeyEnv, accessToken, accessTokenEnv, userId, quotaPerUnit, adapters, skipModels }` |
 
 ## 演示（模拟数据）
 
@@ -165,7 +189,7 @@ agent 侧则直接用工具：`provider_quote()` / `provider_quote({ models: tru
 
 ```bash
 node tests/demo-openrouter.mjs  # 演示：fetch 桩喂 OpenRouter 数据跑真实报价管线（不联网、不需要 key）
-node tests/smoke.mjs --offline  # 21 项：纯函数、询价目标解析与缓存逻辑（含 fetch 桩，不联网）—— 任何机器都能直接跑
+node tests/smoke.mjs --offline  # 31 项：纯函数、询价目标解析与缓存逻辑、余额适配器（含 New API 访问令牌/占位值，全用 fetch 桩，不联网）—— 任何机器都能直接跑
 node tests/client-smoke.mjs     # 15 项：客户端 bundle 的模块工厂 + 两个 slot 注册 + 面板渲染 + 余额胶囊（显示/点击刷新/失败态/跟随本会话选择/切换会话/刷新带会话）
 ```
 
@@ -187,6 +211,7 @@ DSH_CREDENTIALS=~/.dsh/.credentials.yaml node tests/smoke.mjs
 * **改宿主代码后必须重启 DSH**：loader 按「解析后的模块 URL」缓存模块，换文件名（新 URL）或 `plugin_manager set_bundle` 关/开可以在运行中切到新代码代，同一 URL 的旧模块实例换不掉。**客户端半（`client.js`）不受影响**：保存后 `set_bundle` 关/开即会在页面上重新挂载（无需重启）。
 * 价格是 **OpenRouter 目录参考价**；中转站常有自己的倍率，差额需用 `priceOverrides` 校正。
 * 部分网关（只转发不结算的那种）没有公开余额接口，面板会明确显示「额度没查到」并列出试过的接口，与 cc-switch 的表现一致。
+* **New API 面板只认访问令牌**：`GET /api/user/self` 对 `sk-` API key 恒回 401（只接受 dashboard 会话或 PAT），所以「准确余额」必须显式配 `accessToken` / `accessTokenEnv`；不配也不会再显示九位数的假余额，而是如实报「已用 $X」。
 * 面板不会写配置：`scripts` / `priceOverrides` / `providers` 目前手写在 `cordis.patch.yml` 的 config 里（改完重启 DSH 生效）。
 * 插件只读不写：查询余额会带上你的 API key 去对应厂商自己的接口，插件不发往任何第三方；`client.js` 也只在本地渲染，不上报任何数据。
 

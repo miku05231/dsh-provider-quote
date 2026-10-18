@@ -119,6 +119,145 @@ const challenge = await fetchPriceCatalog({ timeoutMs: 100, fetchImpl: respond(2
 check('目录下载：HTTP 200 但非 JSON 记为失败', challenge.ok === false && challenge.models.length === 0, challenge.error);
 const emptyCatalog = await fetchPriceCatalog({ timeoutMs: 100, fetchImpl: respond(200, JSON.stringify({ data: [] })) });
 check('目录下载：HTTP 200 但 0 个模型记为失败', emptyCatalog.ok === false && emptyCatalog.error === '目录返回 0 个模型');
+
+/* ---- balance adapters：New API 哨兵值 / 访问令牌 / quota 换算（离线，注入 fetch） ---- */
+const jsonText = (value) => JSON.stringify(value);
+/** 按 URL 子串路由的假 fetch：键是子串，值是 [status, body]。 */
+const routes = (table) => async (url) => {
+  const key = Object.keys(table).find((pattern) => url.includes(pattern));
+  if (key === undefined) return { ok: false, status: 404, text: async () => 'not found' };
+  const [status, body] = table[key];
+  return { ok: status >= 200 && status < 300, status, text: async () => (typeof body === 'string' ? body : jsonText(body)) };
+};
+
+// xianapi.cloud 这类 New API 中转站的真实响应：/user/balance 回 SPA HTML，
+// /api/user/self 对 sk- key 401，billing 接口用 1e8 表示「无限额度」。
+const newApiRelay = {
+  '/api/status': [200, { data: { quota_per_unit: 500000, display_in_currency: true } }],
+  '/api/user/self': [401, { code: 'AUTH_UNAUTHORIZED', message: 'Unauthorized, invalid access token', success: false }],
+  '/dashboard/billing/subscription': [200, { object: 'billing_subscription', hard_limit_usd: 100000000, soft_limit_usd: 100000000 }],
+  '/dashboard/billing/usage': [200, { object: 'list', total_usage: 128.5912 }],
+  '/user/balance': [200, '<!doctype html><html><body>app</body></html>'],
+};
+const sentinelQuote = await queryBalance({
+  baseURL: 'https://relay.example.com/v1',
+  apiKey: 'sk-test',
+  timeoutMs: 100,
+  fetchImpl: routes(newApiRelay),
+});
+check(
+  'New API 的 1e8「无限额度」占位值不会被当成余额',
+  sentinelQuote.ok === false && sentinelQuote.reason.includes('占位值'),
+  `${sentinelQuote.reason}`,
+);
+check(
+  '哨兵值失败时仍带出真实已用（total_usage ÷ 100）',
+  Math.abs((sentinelQuote.usageOnly?.usage ?? 0) - 1.285912) < 1e-9 && sentinelQuote.usageOnly?.unit === 'USD',
+  jsonText(sentinelQuote.usageOnly),
+);
+check(
+  '没有访问令牌时提示去建 PAT',
+  sentinelQuote.reason.includes('访问令牌'),
+  sentinelQuote.reason,
+);
+
+// 配了访问令牌 → New API 适配器用 /api/user/self 的 quota 换算真实余额
+const withToken = await queryBalance({
+  baseURL: 'https://relay.example.com/v1',
+  apiKey: 'sk-test',
+  accessToken: 'pat-test',
+  timeoutMs: 100,
+  fetchImpl: routes({
+    ...newApiRelay,
+    '/api/user/self': [200, { success: true, data: { quota: 2500000, used_quota: 500000, status: 1 } }],
+  }),
+});
+check(
+  '访问令牌 → quota ÷ quota_per_unit 得到真实余额',
+  withToken.ok === true && withToken.adapter === 'new-api' && withToken.remaining === 5 && withToken.detail.usage === 1,
+  `${withToken.adapter} → ${withToken.remaining} ${withToken.unit}（已用 ${withToken.detail?.usage}）`,
+);
+check(
+  '已用/总额与余额自洽（quota 与 used_quota 一起换算）',
+  withToken.detail.total === 6 && withToken.isValid === true,
+  jsonText({ total: withToken.detail.total, quotaPerUnit: withToken.detail.quotaPerUnit }),
+);
+
+// 写死 adapters: ['new-api'] 却没配令牌：要报出「缺访问令牌」，而不是含糊的「均未命中」
+const forcedNewApi = await queryBalance({
+  baseURL: 'https://relay.example.com/v1',
+  apiKey: 'sk-test',
+  adapters: ['new-api'],
+  timeoutMs: 100,
+  fetchImpl: routes(newApiRelay),
+});
+check(
+  '写死 new-api 适配器但缺令牌时报出原因',
+  forcedNewApi.ok === false && forcedNewApi.reason.includes('未配置访问令牌'),
+  forcedNewApi.reason,
+);
+
+// 站点改过 QuotaPerUnit 时按 /api/status 的站点值换算，而不是硬编码 500000
+const customUnit = await queryBalance({
+  baseURL: 'https://relay2.example.com/v1',
+  accessToken: 'pat-test',
+  timeoutMs: 100,
+  fetchImpl: routes({
+    '/api/status': [200, { data: { quota_per_unit: 1000000 } }],
+    '/api/user/self': [200, { success: true, data: { quota: 2000000, used_quota: 0, status: 1 } }],
+  }),
+});
+check('quota_per_unit 非默认值时按站点换算', customUnit.remaining === 2, `${customUnit.remaining} USD`);
+
+// one-api 分支（允许 key 直读 /api/user/self 的分支版本）也吃 quotaPerUnit
+const oneApi = await queryBalance({
+  baseURL: 'https://relay3.example.com/v1',
+  apiKey: 'sk-test',
+  quotaPerUnit: 1000000,
+  timeoutMs: 100,
+  fetchImpl: routes({ '/api/user/self': [200, { success: true, data: { quota: 3000000, used_quota: 1000000 } }] }),
+});
+check(
+  'one-api 适配器按 quotaPerUnit 换算',
+  oneApi.ok === true && oneApi.adapter === 'one-api' && oneApi.remaining === 3 && oneApi.detail.usage === 1,
+  `${oneApi.adapter} → ${oneApi.remaining} ${oneApi.unit}`,
+);
+
+// 非哨兵值的 billing 接口照旧可用（别把正常中转站也判死）
+const normalBilling = await queryBalance({
+  baseURL: 'https://relay4.example.com/v1',
+  apiKey: 'sk-test',
+  timeoutMs: 100,
+  fetchImpl: routes({
+    '/dashboard/billing/subscription': [200, { hard_limit_usd: 20 }],
+    '/dashboard/billing/usage': [200, { total_usage: 350 }],
+  }),
+});
+check(
+  '正常 billing 接口（上限 $20 / 已用 $3.5）仍返回余额',
+  normalBilling.ok === true && normalBilling.remaining === 16.5,
+  `${normalBilling.remaining} USD`,
+);
+
+// 文案层：失败但有已用时，提示里要带上「已用」
+const usageText = renderQuoteText({
+  generatedAt: 'T',
+  active: { provider: 'relay', model: 'm' },
+  catalog: null,
+  providers: [{
+    id: 'relay',
+    name: 'Relay',
+    baseURL: 'https://relay.example.com/v1',
+    balance: sentinelQuote,
+    models: [],
+    modelCount: 0,
+  }],
+});
+check(
+  '报价文案：查不到余额但有已用时要写出来',
+  usageText.includes('已用 1.2859 USD'),
+  usageText.split('\n').find((line) => line.includes('余额:')) ?? usageText,
+);
 let reloads = 0;
 const reused = await resolveCatalog({
   previous: good,

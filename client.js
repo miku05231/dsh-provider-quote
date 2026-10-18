@@ -56,14 +56,26 @@ window.__ModuleLoader__.load({
       return iso.replace('T', ' ').replace(/\.\d+Z$/, ' UTC').slice(0, 23);
     }
 
-    /** Balance badge for one provider. */
+    /**
+     * Balance badge for one provider.
+     * 返回 `{ text, label, detail, warn, dim }`：`label` 是数字后面那个词
+     * （「余额」/「已用」，查不到余额但拿得到用量时是空串）。
+     */
     function balanceView(balance) {
       if (balance === null || balance === undefined) {
-        return { text: '未查询', detail: '', warn: false, dim: true };
+        return { text: '未查询', label: '余额', detail: '', warn: false, dim: true };
       }
       if (balance.ok !== true) {
         const tried = Array.isArray(balance.attempts) ? balance.attempts.length : 0;
-        return { text: '额度没查到', detail: `${balance.reason ?? '未知原因'}${tried > 0 ? `（试了 ${tried} 个接口）` : ''}`, warn: true, dim: false };
+        const reason = balance.reason ?? '未知原因';
+        const why = `${reason}${tried > 0 ? `（试了 ${tried} 个接口）` : ''}`;
+        const usage = balance.usageOnly ?? undefined;
+        const used = number(usage?.usage);
+        // 余额拿不到但用量拿得到（New API 的 1e8 占位值就是这种情况）：显示已用，别留空
+        if (used !== undefined) {
+          return { text: `已用 ${money(used, usage.unit)}`, label: '', detail: `余额查不到：${why}`, warn: true, dim: false };
+        }
+        return { text: '额度没查到', label: '余额', detail: why, warn: true, dim: false };
       }
       const detail = balance.detail ?? {};
       const notes = [];
@@ -72,10 +84,10 @@ window.__ModuleLoader__.load({
       }
       if (detail.note !== undefined) notes.push(String(detail.note));
       if (balance.isValid === false) {
-        return { text: money(balance.remaining, balance.unit), detail: `${notes.join('；') || '账户已不可用'}`, warn: true, dim: false };
+        return { text: money(balance.remaining, balance.unit), label: '余额', detail: `${notes.join('；') || '账户已不可用'}`, warn: true, dim: false };
       }
       notes.push(`来源 ${balance.source ?? '未知接口'}`);
-      return { text: money(balance.remaining, balance.unit), detail: notes.join('；'), warn: false, dim: false };
+      return { text: money(balance.remaining, balance.unit), label: '余额', detail: notes.join('；'), warn: false, dim: false };
     }
 
     function activeModelOf(provider) {
@@ -223,7 +235,7 @@ window.__ModuleLoader__.load({
             : h('span', { key: 'id', style: { color: color.dimmed, fontSize: 11 } }, provider.id),
           h('span', { key: 'spacer', style: { flex: 1 } }),
           h('span', { key: 'balance', style: { color: balance.warn ? color.warn : color.primary, fontSize: 13, fontVariantNumeric: 'tabular-nums' } }, balance.text),
-          h('span', { key: 'unit', style: { color: color.dimmed, fontSize: 11 } }, '余额'),
+          balance.label === '' ? null : h('span', { key: 'unit', style: { color: color.dimmed, fontSize: 11 } }, balance.label),
         ]),
         h('div', { key: 'base', style: { color: color.dimmed, fontSize: 11, wordBreak: 'break-all' } }, provider.baseURL ?? 'baseURL 未知（未在配置里发现，可在插件 config.providers 里补）'),
         balance.detail !== ''
@@ -442,14 +454,17 @@ window.__ModuleLoader__.load({
           ? color.dimmed
           : color.ok;
 
-      const unavailable = active !== undefined && view.dim !== true && active.balance?.ok !== true;
-      const text = failed || unavailable
+      const noBalance = active !== undefined && view.dim !== true && active.balance?.ok !== true;
+      const text = failed
         ? '余额没查到'
         : loading
           ? '余额查询中…'
           : active === undefined || view.dim === true
             ? '余额未知'
-            : `余额 ${view.text}`;
+            // 查不到余额但有真实用量（New API 的无限额度占位值）→ 直接显示「已用 X」
+            : noBalance
+              ? view.text
+              : `余额 ${view.text}`;
 
       const sourceNote = choice === null ? '全局默认（本会话未选过模型）' : '本会话选择';
       const title = failed
@@ -461,7 +476,7 @@ window.__ModuleLoader__.load({
               ? '没有发现已配置的提供商'
               : `${selectedId ?? '当前提供商'} 不在询价列表（未配置 baseURL 或未纳入报价）· 点击刷新`
             : [
-              `${active.id} 余额 ${view.text}`,
+              `${active.id} ${noBalance ? view.text : `余额 ${view.text}`}`,
               sourceNote,
               view.detail === '' ? null : view.detail,
               '点击刷新',
